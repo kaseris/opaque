@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# MLflow local tracking store
+mlruns/
+mlartifacts/
+
+# Node / Vite (relabeling frontend)
+node_modules/
+src/opaque/relabel/web/node_modules/
+
+# OS
+.DS_Store
+
+# Coverage artifact
+.coverage
+
+# Demo target repo — kept as its own standalone git repo, not vendored into opaque
+examples/demo_project/
