@@ -145,6 +145,128 @@ def relabel(
     serve(repo, tool, tracking_uri=tracking_uri, host=host, port=port, open_browser=not no_browser)
 
 
+@app.command()
+def check(
+    repo: str = typer.Option('.', '--repo', help='path to the target project repo'),
+    stdin: bool = typer.Option(False, '--stdin', help='read pre-push ref lines from stdin'),
+    base: str = typer.Option(None, '--base', help='compare from this rev (default: merge-base)'),
+    head: str = typer.Option(None, '--head', help='compare to this rev (default: HEAD)'),
+    tool: list[str] = typer.Option(None, '--tool', '-t', help='limit to these tools (repeatable)'),
+    tracking_uri: str = typer.Option('./mlruns', '--tracking-uri', help='MLflow store'),
+    gate: bool = typer.Option(False, '--gate', help='exit non-zero on regression (blocks the push)'),
+    tolerance: float = typer.Option(0.0, '--tolerance', help='allowed drop before --gate fails'),
+    comment: bool = typer.Option(False, '--comment', help="post the summary to the branch's PR via gh"),
+    out: str = typer.Option(None, '--out', help='write the markdown summary to this path'),
+):
+    """Evaluate the tools whose prompts changed in a push — the pre-push hook's entry point.
+
+    Runs locally against the developer's own eval data, credentials, and MLflow store, since
+    none of those survive an ephemeral CI runner. Exits 0 even when a tool regresses unless
+    --gate is set: a push should not be held hostage to an LLM eval by default.
+    """
+    from .config.loader import ConfigNotFound
+    from .hooks import push as hook_push
+    from .hooks import summary as hook_summary
+
+    refs = hook_push.parse_push_refs(_read_stdin()) if stdin else None
+
+    try:
+        result = hook_push.check(
+            repo, refs=refs, base=base, head=head, tools=list(tool) if tool else None,
+            tracking_uri=tracking_uri,
+        )
+    except ConfigNotFound:
+        return  # Not an onboarded repo — the hook stays silent rather than nagging.
+    except Exception as exc:  # noqa: BLE001 — an eval problem must not strand a push.
+        typer.secho(f'opaque check failed: {exc}', fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(1 if gate else 0)
+
+    typer.echo(hook_summary.render_terminal(result))
+
+    body = hook_summary.render_markdown(result)
+    if out:
+        Path(out).write_text(body)
+        typer.echo(f'  summary: {out}')
+    if comment and result.ran:
+        typer.echo(f'  {hook_summary.post_comment(repo, body, result.branch)}')
+
+    worst = result.worst_delta()
+    if gate and worst is not None and worst < -tolerance:
+        typer.secho(
+            f'opaque: blocking push — headline metric dropped {worst:+.4f} '
+            f'(tolerance {tolerance:.4f}). Push anyway with OPAQUE_SKIP=1 git push.',
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+hook_app = typer.Typer(add_completion=False, help="Manage the pre-push hook that triggers local evals.")
+app.add_typer(hook_app, name='hook')
+
+
+@hook_app.command('install')
+def hook_install(
+    repo: str = typer.Argument('.', help='path to the target project repo'),
+    gate: bool = typer.Option(False, '--gate', help='block the push when the metric regresses'),
+    comment: bool = typer.Option(False, '--comment', help='post results to the PR via gh'),
+    tracking_uri: str = typer.Option(None, '--tracking-uri', help='pin the MLflow store (absolute path recommended)'),
+    python: str = typer.Option(None, '--python', help='interpreter to run opaque with (default: current)'),
+    force: bool = typer.Option(False, '--force', help='replace an existing non-opaque hook'),
+):
+    """Install the pre-push hook into a repo."""
+    from .hooks.installer import HookError, install
+
+    try:
+        path = install(
+            repo, python=python, gate=gate, comment=comment,
+            tracking_uri=tracking_uri, force=force,
+        )
+    except HookError as exc:
+        typer.secho(f'Error: {exc}', fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.echo(f'Installed {path}')
+    typer.echo('  Pushes that touch a tracked prompt or field-schema file now run an eval locally.')
+    typer.echo('  Skip one push with: OPAQUE_SKIP=1 git push')
+
+
+@hook_app.command('uninstall')
+def hook_uninstall(repo: str = typer.Argument('.', help='path to the target project repo')):
+    """Remove opaque's pre-push hook."""
+    from .hooks.installer import HookError, uninstall
+
+    try:
+        path = uninstall(repo)
+    except HookError as exc:
+        typer.secho(f'Error: {exc}', fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.echo(f'Removed {path}' if path else 'No hook installed.')
+
+
+@hook_app.command('status')
+def hook_status(repo: str = typer.Argument('.', help='path to the target project repo')):
+    """Report whether the pre-push hook is installed."""
+    from .hooks.installer import HookError, hook_path, is_ours
+
+    try:
+        path = hook_path(repo)
+    except HookError as exc:
+        typer.secho(f'Error: {exc}', fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if not path.exists():
+        typer.echo(f'Not installed ({path} absent).')
+    elif is_ours(path):
+        typer.echo(f'Installed: {path}')
+    else:
+        typer.secho(f'A non-opaque {path} exists — install with --force to replace it.', fg=typer.colors.YELLOW)
+
+
+def _read_stdin() -> str:
+    import sys
+
+    return '' if sys.stdin.isatty() else sys.stdin.read()
+
+
 def _print_run_summary(out) -> None:
     r = out.result
     typer.secho(f'{r.project}/{r.tool.name}', bold=True, nl=False)

@@ -42,6 +42,64 @@ uv run opaque relabel examples/demo_project --tool invoices   # -> http://127.0.
 | `opaque report <repo> --tool NAME --out report.xlsx` | On-demand Excel report, no MLflow logging (§10) |
 | `opaque ui [--tracking-uri ./mlruns] [--port 5000]` | Launch MLflow's built-in run browser (§8.3) |
 | `opaque relabel <repo> --tool NAME [--port 8000]` | Launch the relabeling UI (§9) |
+| `opaque hook install <repo> [--gate] [--comment] [--tracking-uri …]` | Install the pre-push hook that triggers local evals |
+| `opaque hook status\|uninstall <repo>` | Inspect or remove that hook |
+| `opaque check --repo <repo> [--stdin] [--gate] [--comment] [--out FILE]` | Evaluate the tools whose prompts a push touches |
+
+## PR-triggered evaluation (running locally)
+
+The natural moment to evaluate a prompt change is when it is proposed for review — but an
+opaque run needs the target project's model credentials, its eval data, and an MLflow store
+that persists across runs, none of which survive an ephemeral CI runner. So the **trigger is
+PR-shaped while execution stays local**:
+
+```bash
+uv run opaque hook install /path/to/your/repo --tracking-uri ~/opaque/mlruns
+```
+
+That installs a `pre-push` hook. Every PR creation and every PR update is preceded by exactly
+one push from your machine, so the hook fires once per PR-affecting event — unlike
+`post-commit`, which would evaluate half-finished prompt states nobody will act on, and bill
+you for each.
+
+```
+$ git push origin tweak-extraction
+opaque: evaluated 1 tool(s) on tweak-extraction
+  • invoices: field_accuracy=0.6231 (baseline 0.5926, ▲ +0.0305)  3 labeled
+```
+
+- **Only fires when it matters.** A push is evaluated only if it changes a file listed under a
+  tool's `prompts:` or its `field_schema_path`. Docs-only pushes cost nothing.
+- **Eval data is deliberately not a trigger.** It is git-versioned in the same repo and the
+  relabeling UI commits to it (§9.2), so triggering on it would fire runs whose deltas reflect
+  moved gold rather than a changed prompt. If a push changes *both*, the run happens and the
+  summary says the delta is not prompt-attributable.
+- **Non-blocking by default.** A regression is reported, not enforced; the push proceeds. Add
+  `--gate` at install time to block instead, and `--tolerance` to allow a small drop. Skip any
+  single push with `OPAQUE_SKIP=1 git push`.
+- **`--comment`** posts the summary to the branch's PR via `gh`, best-effort (no `gh`, no PR,
+  or no auth are all normal and never fail a push).
+
+### Where runs land
+
+`prompt_impact.html` diffs consecutive runs *within one experiment* in wall-clock order and has
+no branch awareness, so concurrent branches writing to the same experiment would produce deltas
+between unrelated prompt states. Runs are therefore routed:
+
+| Pushed branch | Experiment |
+|---|---|
+| integration branch (`main`) | `{project}/{tool}` — the canonical, serialized history |
+| any other branch | `{project}/{tool}@{branch}` — isolated |
+
+Baselines always come from the canonical experiment, so a branch's delta answers "versus what
+is on `main` today" regardless of where its own run is logged.
+
+### Interpreter caveat
+
+Git runs hooks with a minimal environment that does **not** include an activated virtualenv, so
+a `command:` beginning with a bare `python` can work by hand and fail from the hook. Name an
+interpreter that resolves outside your shell (`python3`), or an absolute path to the project's
+own venv when the eval script has dependencies.
 
 `--prompt` selects which prompt file fills each role at run time (repeatable, e.g.
 `--prompt system=prompts/system.txt --prompt extraction=prompts/extraction.txt`); it
@@ -71,6 +129,8 @@ prompts + eval data (git-versioned)        from the invocation contract, runs it
   `--allow-dirty` (§4.1).
 - **Tracking / Report / Relabel** — MLflow logging (§8), the 3-sheet Excel report (§10), and
   the FastAPI + Vue relabeling UI (§9).
+- **Hooks** (`src/opaque/hooks/`) — the pre-push trigger: push-range parsing, change detection
+  against tracked prompt paths, branch-scoped experiment routing, and the PR summary.
 
 ## Onboarding config
 
@@ -91,7 +151,7 @@ tools:
     invocation:
       # Placeholders: {input} {output_dir} {prompt.<role>} {model} {temperature}
       command: >-
-        python eval_script.py --task extraction --input {input} --out {output_dir}
+        python3 eval_script.py --task extraction --input {input} --out {output_dir}
         --system {prompt.system} --extraction {prompt.extraction}
 ```
 

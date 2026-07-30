@@ -13,6 +13,11 @@ class GitError(RuntimeError):
     """A git command exited non-zero."""
 
 
+# git uses an all-zero sha to mean "no such object" — a branch being created (no remote
+# counterpart yet) or deleted. Both show up on a pre-push hook's stdin.
+NULL_SHA = '0' * 40
+
+
 def _run(repo: str | Path, args: list[str]) -> str:
     result = subprocess.run(
         ['git', *args],
@@ -61,6 +66,54 @@ def head_commit(repo: str | Path) -> str | None:
         return _run(repo, ['rev-parse', 'HEAD']).strip()
     except GitError:
         return None
+
+
+def default_branch(repo: str | Path) -> str:
+    """The repo's integration branch — what a PR would target.
+
+    Prefers what the remote advertises (``refs/remotes/origin/HEAD``), falls back to a local
+    ``main``/``master``, then to ``main``. Used to pick the merge base for a branch that has
+    no remote counterpart yet (§ hook: the push that opens a PR).
+    """
+    try:
+        ref = _run(repo, ['symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD']).strip()
+        if ref:
+            return ref.rsplit('/', 1)[-1]
+    except GitError:
+        pass
+    for name in ('main', 'master'):
+        try:
+            _run(repo, ['rev-parse', '--verify', '--quiet', f'refs/heads/{name}'])
+            return name
+        except GitError:
+            continue
+    return 'main'
+
+
+def merge_base(repo: str | Path, a: str, b: str) -> str | None:
+    """Common ancestor of two revisions, or ``None`` when they share no history."""
+    try:
+        return _run(repo, ['merge-base', a, b]).strip() or None
+    except GitError:
+        return None
+
+
+def rev_exists(repo: str | Path, rev: str) -> bool:
+    try:
+        _run(repo, ['rev-parse', '--verify', '--quiet', f'{rev}^{{commit}}'])
+        return True
+    except GitError:
+        return False
+
+
+def changed_paths(repo: str | Path, base: str | None, head: str) -> list[str]:
+    """Repo-relative paths that differ between ``base`` and ``head``.
+
+    With no ``base`` (a branch sharing no history with the integration branch) this falls
+    back to the paths touched by ``head`` itself.
+    """
+    args = ['diff', '--name-only', f'{base}..{head}'] if base else ['show', '--name-only', '--format=', head]
+    return sorted({line.strip() for line in _run(repo, args).splitlines() if line.strip()})
 
 
 def add_and_commit(

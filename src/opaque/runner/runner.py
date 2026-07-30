@@ -166,9 +166,21 @@ def _render_command(template, input_path, output_dir, prompt_paths, model, tempe
 
 
 def _exec(command: str, cwd: Path) -> None:
-    result = subprocess.run(
-        shlex.split(command), cwd=str(cwd), capture_output=True, text=True
-    )
+    argv = shlex.split(command)
+    try:
+        result = subprocess.run(argv, cwd=str(cwd), capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        # Worth naming explicitly: the eval script's interpreter is resolved against whatever
+        # PATH the caller had. An interactive shell with a virtualenv active and a git hook's
+        # minimal environment resolve it differently, so a command that works by hand can fail
+        # from the pre-push hook.
+        raise EvalScriptError(
+            f"Cannot run '{argv[0] if argv else command}' — not found on PATH.\n"
+            f'  command: {command}\n'
+            "  Fix the tool's invocation.command in .opaque/config.yaml: name an interpreter "
+            'that exists outside your shell (e.g. python3), or an absolute path to the '
+            "project's own virtualenv, since git hooks do not inherit an activated venv."
+        ) from exc
     if result.returncode != 0:
         raise EvalScriptError(
             f'Eval script failed (exit {result.returncode}).\n'
