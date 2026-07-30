@@ -43,6 +43,15 @@ class PushRef:
         """No counterpart on the remote yet — i.e. the push that opens the PR."""
         return self.remote_sha == git.NULL_SHA
 
+    @property
+    def is_branch(self) -> bool:
+        """False for tags and other exotic refs, which are never PR events.
+
+        Checked on the *destination* ref because it is the one git always fills in — the
+        local side reads ``(delete)`` when a ref is being deleted.
+        """
+        return self.remote_ref.startswith('refs/heads/')
+
 
 def parse_push_refs(text: str) -> list[PushRef]:
     """Parse the ref lines git feeds a pre-push hook. Malformed lines are ignored."""
@@ -57,17 +66,21 @@ def parse_push_refs(text: str) -> list[PushRef]:
 def push_ranges(
     repo: str | Path, refs: list[PushRef], base_branch: str | None = None
 ) -> list[tuple[str | None, str]]:
-    """``(base, head)`` pairs describing what each pushed ref actually adds.
+    """``(base, head)`` pairs describing what each pushed branch actually adds.
 
     For a branch that already exists on the remote, the base is the remote's current tip — so
     only the newly pushed commits count. For a brand-new branch (the PR-opening push) there is
     no remote tip, so the base is the merge point with the integration branch, which is exactly
     the diff the PR itself will show.
+
+    Deletions and non-branch refs are dropped: ``git push --tags`` after landing a prompt
+    change would otherwise re-evaluate commits that were already scored when the branch itself
+    was pushed.
     """
     base_branch = base_branch or git.default_branch(repo)
     ranges: list[tuple[str | None, str]] = []
     for ref in refs:
-        if ref.is_delete:
+        if ref.is_delete or not ref.is_branch:
             continue
         if not ref.is_new_branch and git.rev_exists(repo, ref.remote_sha):
             base = ref.remote_sha
@@ -213,7 +226,7 @@ def check(
 
     result = CheckResult(branch=branch, base_branch=base_branch, changed=[])
     if not ranges:
-        result.note = 'nothing to evaluate (no refs pushed, or a branch deletion)'
+        result.note = 'nothing to evaluate (no branch refs pushed — a tag, a deletion, or nothing)'
         return result
 
     result.changed = changed_in_ranges(repo, ranges)

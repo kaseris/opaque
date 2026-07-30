@@ -42,7 +42,7 @@ uv run opaque relabel examples/demo_project --tool invoices   # -> http://127.0.
 | `opaque report <repo> --tool NAME --out report.xlsx` | On-demand Excel report, no MLflow logging (§10) |
 | `opaque ui [--tracking-uri ./mlruns] [--port 5000]` | Launch MLflow's built-in run browser (§8.3) |
 | `opaque relabel <repo> --tool NAME [--port 8000]` | Launch the relabeling UI (§9) |
-| `opaque hook install <repo> [--gate] [--comment] [--tracking-uri …]` | Install the pre-push hook that triggers local evals |
+| `opaque hook install <repo> [--gate] [--comment] [--remote origin] [--tracking-uri …]` | Install the pre-push hook that triggers local evals |
 | `opaque hook status\|uninstall <repo>` | Inspect or remove that hook |
 | `opaque check --repo <repo> [--stdin] [--gate] [--comment] [--out FILE]` | Evaluate the tools whose prompts a push touches |
 
@@ -80,6 +80,28 @@ opaque: evaluated 1 tool(s) on tweak-extraction
 - **`--comment`** posts the summary to the branch's PR via `gh`, best-effort (no `gh`, no PR,
   or no auth are all normal and never fail a push).
 
+### What actually fires it
+
+`pre-push` is bound to the *push operation*, not to a branch, and by default git runs it for
+every remote. Measured behaviour:
+
+| Action | Evaluated? |
+|---|---|
+| `git push origin <branch>` | ✅ |
+| `git push backup <branch>` (another remote) | ❌ filtered by `--remote`, default `origin` |
+| `git push --tags` / any `refs/tags/*` push | ❌ never a PR event |
+| `git push --dry-run` | ⚠️ **yes** — git gives the hook no way to tell a dry run apart |
+| `git push` with nothing to send | ✅ runs, but git passes no refs, so it exits immediately |
+| Pushing a branch you do not have checked out | ❌ declined — the eval scores the working tree |
+| Opening/merging a PR in the GitHub UI, "Update branch", web edits | ❌ nothing runs locally |
+
+The remote filter lives in the hook's shell stub, above the `exec`, so an irrelevant push costs
+nothing rather than paying interpreter startup to discover it is irrelevant. Note that git only
+passes a remote *name* as `$1` when you push by name — `git push git@host:repo.git main` passes
+the URL, which does not match and is skipped. Use `--remote ''` to evaluate every remote.
+
+For a dry run that you do not want scored: `OPAQUE_SKIP=1 git push --dry-run`.
+
 ### Where runs land
 
 `prompt_impact.html` diffs consecutive runs *within one experiment* in wall-clock order and has
@@ -93,6 +115,17 @@ between unrelated prompt states. Runs are therefore routed:
 
 Baselines always come from the canonical experiment, so a branch's delta answers "versus what
 is on `main` today" regardless of where its own run is logged.
+
+**Known gap:** merging through the GitHub UI creates the merge commit server-side, so no hook
+fires and the canonical experiment never gets that run — baselines then go stale. Until a
+`post-merge` hook exists, write it by hand after pulling `main`:
+
+```bash
+opaque check --repo . --base ORIG_HEAD --head HEAD
+```
+
+`--base` is required here: on the integration branch the default base is
+`merge-base(HEAD, main)`, which *is* `HEAD`, so the diff comes out empty.
 
 ### Interpreter caveat
 

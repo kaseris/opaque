@@ -211,22 +211,30 @@ def hook_install(
     gate: bool = typer.Option(False, '--gate', help='block the push when the metric regresses'),
     comment: bool = typer.Option(False, '--comment', help='post results to the PR via gh'),
     tracking_uri: str = typer.Option(None, '--tracking-uri', help='pin the MLflow store (absolute path recommended)'),
+    remote: str = typer.Option(
+        None, '--remote',
+        help="only evaluate pushes to this remote (default: origin); pass '' for every remote",
+    ),
     python: str = typer.Option(None, '--python', help='interpreter to run opaque with (default: current)'),
     force: bool = typer.Option(False, '--force', help='replace an existing non-opaque hook'),
 ):
     """Install the pre-push hook into a repo."""
-    from .hooks.installer import HookError, install
+    from .hooks.installer import DEFAULT_REMOTE, HookError, install
+
+    # Unset means the default remote; an explicit empty string means "do not filter at all".
+    remote_filter = DEFAULT_REMOTE if remote is None else (remote or None)
 
     try:
         path = install(
             repo, python=python, gate=gate, comment=comment,
-            tracking_uri=tracking_uri, force=force,
+            tracking_uri=tracking_uri, remote=remote_filter, force=force,
         )
     except HookError as exc:
         typer.secho(f'Error: {exc}', fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
     typer.echo(f'Installed {path}')
-    typer.echo('  Pushes that touch a tracked prompt or field-schema file now run an eval locally.')
+    scope = f'to {remote_filter}' if remote_filter else 'to any remote'
+    typer.echo(f'  Pushes {scope} that touch a tracked prompt or field-schema file now run an eval locally.')
     typer.echo('  Skip one push with: OPAQUE_SKIP=1 git push')
 
 
