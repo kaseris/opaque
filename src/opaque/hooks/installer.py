@@ -17,6 +17,10 @@ from pathlib import Path
 MARKER = '# opaque-managed-hook v1'
 HOOK_NAME = 'pre-push'
 
+# Pushes to anything else (a backup remote, a fork) are not PR events, so they should not
+# cost an evaluation. Pass ``remote=None`` to evaluate pushes to every remote.
+DEFAULT_REMOTE = 'origin'
+
 _TEMPLATE = """\
 #!/bin/sh
 {marker}
@@ -26,7 +30,17 @@ _TEMPLATE = """\
 if [ -n "${{OPAQUE_SKIP:-}}" ]; then
   exit 0
 fi
-exec {python} -m opaque check --repo {repo} --stdin{extra}
+{remote_guard}exec {python} -m opaque check --repo {repo} --stdin{extra}
+"""
+
+# Filtering by remote in the shell rather than in `opaque check` keeps an irrelevant push
+# (a backup remote, a fork) from paying interpreter startup just to decide it is irrelevant.
+_REMOTE_GUARD = """\
+# Only pushes to this remote are evaluated. Git passes the remote *name* as $1; pushing by URL
+# (git push git@host:repo.git ...) passes the URL instead, and is therefore skipped.
+if [ "$1" != {remote} ]; then
+  exit 0
+fi
 """
 
 
@@ -73,6 +87,7 @@ def render_hook(
     gate: bool = False,
     comment: bool = False,
     tracking_uri: str | None = None,
+    remote: str | None = DEFAULT_REMOTE,
 ) -> str:
     extra = ''
     if tracking_uri:
@@ -86,6 +101,7 @@ def render_hook(
         python=shlex.quote(python or sys.executable),
         repo=shlex.quote(str(Path(repo).resolve())),
         extra=extra,
+        remote_guard=_REMOTE_GUARD.format(remote=shlex.quote(remote)) if remote else '',
     )
 
 
@@ -96,6 +112,7 @@ def install(
     gate: bool = False,
     comment: bool = False,
     tracking_uri: str | None = None,
+    remote: str | None = DEFAULT_REMOTE,
     force: bool = False,
 ) -> Path:
     """Write the pre-push hook. Refuses to overwrite a hook opaque did not write."""
@@ -107,7 +124,10 @@ def install(
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        render_hook(repo, python=python, gate=gate, comment=comment, tracking_uri=tracking_uri)
+        render_hook(
+            repo, python=python, gate=gate, comment=comment,
+            tracking_uri=tracking_uri, remote=remote,
+        )
     )
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return path

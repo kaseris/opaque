@@ -33,6 +33,10 @@ def _ref(sha: str, branch: str = 'feature', remote_sha: str = NULL_SHA) -> push.
     return push.PushRef(f'refs/heads/{branch}', sha, f'refs/heads/{branch}', remote_sha)
 
 
+def _tag_ref(sha: str, tag: str = 'v1.0') -> push.PushRef:
+    return push.PushRef(f'refs/tags/{tag}', sha, f'refs/tags/{tag}', NULL_SHA)
+
+
 # --- ref parsing -----------------------------------------------------------------------
 
 
@@ -48,6 +52,30 @@ def test_parse_push_refs_reads_git_stdin_format():
 def test_deleted_branch_yields_no_range(project):
     refs = [_ref(NULL_SHA, remote_sha='2' * 40)]
     assert push.push_ranges(project.path, refs) == []
+
+
+def test_tag_push_is_ignored(project):
+    """`git push --tags` after landing a prompt change would otherwise re-score commits that
+    were already evaluated when the branch itself was pushed."""
+    project.git('checkout', '-q', '-b', 'feature')
+    project.write('prompts/extraction.txt', 'v2\n')
+    head = project.commit('tweak prompt')
+
+    assert push.push_ranges(project.path, [_tag_ref(head)]) == []
+    # The same commit pushed as a branch is still evaluated.
+    assert push.push_ranges(project.path, [_ref(head)]) != []
+
+
+def test_tag_only_push_reports_nothing_to_evaluate(project):
+    project.git('checkout', '-q', '-b', 'feature')
+    project.write('prompts/extraction.txt', 'v2\n')
+    head = project.commit('tweak prompt')
+
+    result = push.check(
+        project.path, refs=[_tag_ref(head)], tracking_uri=str(project.path / 'store')
+    )
+    assert result.checks == []
+    assert 'no branch refs' in result.note
 
 
 def test_new_branch_bases_on_merge_point_with_default_branch(project):
@@ -249,6 +277,29 @@ def test_installed_hook_honours_flags(project):
     assert '--gate' in body and '--comment' in body and '/srv/mlruns' in body
 
 
+def test_hook_filters_to_origin_by_default(project):
+    body = installer.install(project.path).read_text()
+    assert '"$1" != origin' in body
+
+
+def test_hook_remote_filter_is_configurable(project):
+    body = installer.install(project.path, remote='upstream').read_text()
+    assert '"$1" != upstream' in body
+    assert '"$1" != origin' not in body
+
+
+def test_hook_remote_filter_can_be_disabled(project):
+    body = installer.install(project.path, remote=None).read_text()
+    assert '"$1" !=' not in body
+
+
+def test_remote_guard_short_circuits_before_python(project):
+    """The guard must sit above the exec line, or an irrelevant push still pays interpreter
+    startup just to decide it is irrelevant."""
+    body = installer.install(project.path).read_text()
+    assert body.index('"$1" != origin') < body.index('exec ')
+
+
 def test_reinstall_overwrites_our_own_hook(project):
     installer.install(project.path)
     path = installer.install(project.path, gate=True)
@@ -290,6 +341,14 @@ def test_hooks_dir_honours_core_hooks_path(project):
 
 
 # --- CLI -------------------------------------------------------------------------------
+
+
+def test_hook_cli_remote_flag(project):
+    runner.invoke(app, ['hook', 'install', str(project.path), '--remote', 'upstream'])
+    assert '"$1" != upstream' in installer.hook_path(project.path).read_text()
+
+    runner.invoke(app, ['hook', 'install', str(project.path), '--remote', ''])
+    assert '"$1" !=' not in installer.hook_path(project.path).read_text()
 
 
 def test_hook_cli_install_status_uninstall(project):
