@@ -51,8 +51,11 @@ tools:
     temperature: 0.0
     invocation:
       # Placeholders: {{input}} {{output_dir}} {{prompt.<role>}} {{model}} {{temperature}}
+      # Name an interpreter that resolves outside an activated shell — the pre-push hook runs
+      # with git's minimal environment. An absolute path to this project's venv is safest when
+      # the eval script has dependencies.
       command: >-
-        python eval_script.py --input {{input}} --out {{output_dir}}
+        python3 eval_script.py --input {{input}} --out {{output_dir}}
         --system {{prompt.system}} --extraction {{prompt.extraction}}
         --model {{model}} --temperature {{temperature}}
 """

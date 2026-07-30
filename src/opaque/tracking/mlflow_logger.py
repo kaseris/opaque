@@ -24,16 +24,29 @@ if TYPE_CHECKING:
 DEFAULT_TRACKING_URI = './mlruns'
 
 
+def canonical_experiment(result: 'RunResult') -> str:
+    """The §8.1 experiment name for a run: one per (project, tool) pair."""
+    return f'{result.project}/{result.tool.name}'
+
+
 def log_run(
     result: 'RunResult',
     tracking_uri: str = DEFAULT_TRACKING_URI,
     report_path: str | Path | None = None,
+    experiment: str | None = None,
 ) -> str:
-    """Log a completed run to MLflow. Returns the MLflow run id."""
-    mlflow.set_tracking_uri(_resolve_uri(tracking_uri))
-    mlflow.set_experiment(f'{result.project}/{result.tool.name}')
+    """Log a completed run to MLflow. Returns the MLflow run id.
 
-    experiment = f'{result.project}/{result.tool.name}'
+    ``experiment`` overrides the §8.1 ``{project}/{tool}`` default. The impact report
+    (``prompt_impact.html``) diffs consecutive runs *within one experiment* in wall-clock
+    order, so runs that are not part of a single serialized history — a feature branch's
+    runs, for instance — belong in their own experiment or their deltas compare unrelated
+    prompt states. See ``hooks.push`` for the branch-scoped naming.
+    """
+    experiment = experiment or canonical_experiment(result)
+    mlflow.set_tracking_uri(resolve_uri(tracking_uri))
+    mlflow.set_experiment(experiment)
+
     run_name = f'{result.prompt_bundle.bundle_hash}-{result.model}-{result.timestamp}'
     with mlflow.start_run(run_name=run_name) as run:
         mlflow.log_params(_params(result))
@@ -47,7 +60,7 @@ def log_run(
     # prompt history. Runs after the current one is finished so it is included. Never allowed
     # to fail the eval — the run is already logged above.
     try:
-        log_impact_report(_resolve_uri(tracking_uri), experiment, run_id)
+        log_impact_report(resolve_uri(tracking_uri), experiment, run_id)
     except Exception as exc:  # noqa: BLE001 — a report failure must not sink a logged run.
         warnings.warn(f'prompt-impact report skipped: {exc}', RuntimeWarning, stacklevel=2)
 
@@ -123,7 +136,7 @@ def _log_classification_artifacts(tmp: Path, result: 'RunResult') -> None:
     mlflow.log_artifacts(str(cdir), artifact_path='classification')
 
 
-def _resolve_uri(tracking_uri: str) -> str:
+def resolve_uri(tracking_uri: str) -> str:
     # A bare local path becomes a file:// store; explicit schemes (http, file, etc.) pass through.
     uri = tracking_uri if '://' in tracking_uri else Path(tracking_uri).resolve().as_uri()
     if uri.startswith('file:'):

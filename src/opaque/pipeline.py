@@ -34,6 +34,7 @@ def evaluate(
     tracking_uri: str = DEFAULT_TRACKING_URI,
     report: bool = True,
     log: bool = True,
+    experiment: str | None = None,
 ) -> PipelineResult:
     result = run(
         repo, tool,
@@ -48,5 +49,9 @@ def evaluate(
         report_dir = Path(tempfile.mkdtemp(prefix='opaque-report-'))
         report_path = build_report(result, report_dir / 'report.xlsx')
 
-    run_id = log_run(result, tracking_uri=tracking_uri, report_path=report_path) if log else None
+    run_id = (
+        log_run(result, tracking_uri=tracking_uri, report_path=report_path, experiment=experiment)
+        if log
+        else None
+    )
     return PipelineResult(result=result, run_id=run_id, report_path=report_path)

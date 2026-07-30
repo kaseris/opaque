@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config.models import ToolConfig
-from ..tracking.mlflow_logger import _resolve_uri
+from ..tracking.mlflow_logger import resolve_uri
 from ..versioning.versions import prompt_bundle
 
 
@@ -33,7 +33,7 @@ def _latest_predictions(repo, project, tool, tracking_uri) -> dict[str, Any]:
     import mlflow
 
     bundle = prompt_bundle(repo, tool.prompts)
-    uri = _resolve_uri(tracking_uri)
+    uri = resolve_uri(tracking_uri)
     client = mlflow.MlflowClient(tracking_uri=uri)
 
     experiment = client.get_experiment_by_name(f'{project}/{tool.name}')
